@@ -8,7 +8,7 @@
 
 const GAS_API_CONFIG = {
   // 【要差し替え】GAS Web AppをデプロイしたURL(.../exec)に置き換えること(README参照)
-  BASE_URL: 'YOUR_NEW_GAS_URL'
+  BASE_URL: 'https://script.google.com/macros/s/AKfycbwNNiZ6kVYPhvHnBnhFuhuPFJMeWVMJtc1EctFltaqGS3Z2XlgZmFWA9WWAoD3AzzLV/exec'
 };
 
 /**
