@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex" />
+  <title>地方銀行フードセレクション2026 打刻</title>
+  <link rel="stylesheet" href="../assets/css/style.css" />
+</head>
+<body>
+  <header class="site-header">
+    <span class="back-link">地方銀行フードセレクション2026</span>
+  </header>
+
+  <main class="page-container">
+    <h1 class="page-title">地方銀行フードセレクション2026 打刻</h1>
+    <p class="page-lead">
+      QRコードに含まれる6桁の数字を読み取り、打刻日時とともに記録します。
+      カメラが使えない場合は、下部の手入力欄をご利用ください。
+    </p>
+
+    <!-- APIキー入力(初回のみ。sessionStorageに保持) -->
+    <div class="form-card" id="keyCard">
+      <form id="keyForm" novalidate>
+        <div class="form-group">
+          <label class="form-label" for="apiKeyInput">管理者APIキー(ADMIN_API_KEY)</label>
+          <input type="password" id="apiKeyInput" autocomplete="off" />
+        </div>
+        <p class="form-message form-message--error" id="keyError" hidden></p>
+        <button type="submit" class="btn btn-block btn-lg" id="keySubmitBtn">開始する</button>
+      </form>
+    </div>
+
+    <div id="scanApp" hidden>
+      <div class="form-card">
+        <div class="form-group">
+          <label class="form-label" for="noteInput">備考(端末名・場所など。任意)</label>
+          <input type="text" id="noteInput" autocomplete="off" placeholder="例: 受付1番タブレット" />
+        </div>
+
+        <div id="scanResult" class="scan-result scan-result--idle" role="status" aria-live="polite">
+          QRコードを読み取ると、ここに記録結果が表示されます。
+        </div>
+
+        <div class="scan-pending" id="pendingBar" hidden>
+          <span id="pendingCount">未送信: 0件</span>
+          <button type="button" class="btn btn-sm" id="sendPendingBtn">未送信分を送信</button>
+        </div>
+
+        <h2 class="scan-section-title">カメラでQRコードを読み取る</h2>
+        <button type="button" id="cameraToggleBtn" class="btn btn-block btn-lg">カメラを起動</button>
+        <p class="camera-status" id="cameraStatus" hidden></p>
+        <div class="qr-reader-box" id="qr-reader" hidden></div>
+
+        <div class="manual-entry-box">
+          <h2 class="scan-section-title">6桁の番号を手入力する</h2>
+          <form id="manualForm" novalidate>
+            <div class="form-group">
+              <label class="form-label" for="manualCode">6桁の番号</label>
+              <input type="text" id="manualCode" class="scan-code-input" inputmode="numeric" maxlength="6"
+                     autocomplete="off" placeholder="012345" />
+            </div>
+            <button type="submit" class="btn btn-block btn-lg" id="manualSubmitBtn">この番号を記録する</button>
+          </form>
+        </div>
+      </div>
+
+      <div class="scan-list-header">
+        <h2 class="scan-section-title" style="margin: 0;">本日の記録一覧</h2>
+        <div>
+          <button type="button" class="btn btn-sm" id="reloadBtn">再読み込み</button>
+          <button type="button" class="btn btn-sm" id="csvBtn">CSVダウンロード(全件)</button>
+        </div>
+      </div>
+      <p class="form-hint" id="listSummary"></p>
+      <div class="data-table-wrapper">
+        <table class="data-table">
+          <thead>
+            <tr><th>打刻日時</th><th>6桁番号</th><th>備考</th></tr>
+          </thead>
+          <tbody id="scanTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script src="../assets/js/common.js"></script>
+  <script src="../assets/js/api-client.js"></script>
+  <script src="../assets/js/qr-scanner.js"></script>
+  <script>
+    (function () {
+      const API_KEY_STORAGE = 'scanApiKey';
+      const PENDING_STORAGE = 'scanPending';
+      const NOTE_STORAGE = 'scanNote';
+      const DEBOUNCE_MS = 4000;
+
+      const keyCard = document.getElementById('keyCard');
+      const keyForm = document.getElementById('keyForm');
+      const apiKeyInput = document.getElementById('apiKeyInput');
+      const keyError = document.getElementById('keyError');
+      const keySubmitBtn = document.getElementById('keySubmitBtn');
+      const scanApp = document.getElementById('scanApp');
+
+      const noteInput = document.getElementById('noteInput');
+      const resultBox = document.getElementById('scanResult');
+      const pendingBar = document.getElementById('pendingBar');
+      const pendingCount = document.getElementById('pendingCount');
+      const sendPendingBtn = document.getElementById('sendPendingBtn');
+
+      const cameraToggleBtn = document.getElementById('cameraToggleBtn');
+      const cameraStatus = document.getElementById('cameraStatus');
+      const qrReaderBox = document.getElementById('qr-reader');
+
+      const manualForm = document.getElementById('manualForm');
+      const manualCodeInput = document.getElementById('manualCode');
+      const manualSubmitBtn = document.getElementById('manualSubmitBtn');
+
+      const tableBody = document.getElementById('scanTableBody');
+      const listSummary = document.getElementById('listSummary');
+      const reloadBtn = document.getElementById('reloadBtn');
+      const csvBtn = document.getElementById('csvBtn');
+
+      let apiKey = '';
+      let allScans = [];
+      let isProcessing = false;
+      let lastValue = null;
+      let lastScanAt = 0;
+
+      // ---- ユーティリティ -------------------------------------------------
+
+      function pad2(n) { return String(n).padStart(2, '0'); }
+
+      function formatLocal(date) {
+        return date.getFullYear() + '-' + pad2(date.getMonth() + 1) + '-' + pad2(date.getDate()) +
+          ' ' + pad2(date.getHours()) + ':' + pad2(date.getMinutes()) + ':' + pad2(date.getSeconds());
+      }
+
+      function timeOnly(dateTimeString) {
+        const m = /(\d{2}:\d{2}:\d{2})/.exec(dateTimeString || '');
+        return m ? m[1] : (dateTimeString || '');
+      }
+
+      function storageGet(storage, key) {
+        try { return storage.getItem(key); } catch (e) { return null; }
+      }
+
+      function storageSet(storage, key, value) {
+        try { storage.setItem(key, value); } catch (e) { /* 保存できない環境では無視 */ }
+      }
+
+      function showResult(type, mainText, subText) {
+        resultBox.className = 'scan-result scan-result--' + type;
+        resultBox.textContent = mainText;
+        if (subText) {
+          const sub = document.createElement('span');
+          sub.className = 'scan-result-sub';
+          sub.textContent = subText;
+          resultBox.appendChild(sub);
+        }
+        resultBox.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+
+      // ---- 未送信キュー(localStorage) -----------------------------------
+
+      function loadPending() {
+        try {
+          const list = JSON.parse(storageGet(localStorage, PENDING_STORAGE) || '[]');
+          return Array.isArray(list) ? list : [];
+        } catch (e) {
+          return [];
+        }
+      }
+
+      function savePending(list) {
+        storageSet(localStorage, PENDING_STORAGE, JSON.stringify(list));
+        renderPending();
+      }
+
+      function renderPending() {
+        const n = loadPending().length;
+        pendingBar.hidden = n === 0;
+        pendingCount.textContent = '未送信: ' + n + '件';
+      }
+
+      // ---- 記録一覧・CSV ---------------------------------------------------
+
+      function renderList() {
+        const today = formatLocal(new Date()).slice(0, 10);
+        const todays = allScans
+          .filter(function (row) { return String(row['打刻日時']).slice(0, 10) === today; })
+          .reverse(); // シートは古い順のため、新しい順に並べ替える
+
+        tableBody.textContent = '';
+        todays.forEach(function (row) {
+          const tr = document.createElement('tr');
+          const tdTime = document.createElement('td');
+          tdTime.textContent = row['打刻日時'];
+          const tdCode = document.createElement('td');
+          tdCode.className = 'scan-code-cell';
+          tdCode.textContent = row['6桁番号'];
+          const tdNote = document.createElement('td');
+          tdNote.textContent = row['備考'] || '';
+          tr.appendChild(tdTime);
+          tr.appendChild(tdCode);
+          tr.appendChild(tdNote);
+          tableBody.appendChild(tr);
+        });
+        listSummary.textContent = '本日 ' + todays.length + ' 件 / 全 ' + allScans.length + ' 件';
+      }
+
+      async function loadScanLog() {
+        try {
+          const result = await callGasApiGet('getScanLog', { apiKey: apiKey });
+          if (result && result.success) {
+            allScans = result.scans || [];
+            renderList();
+            return { ok: true };
+          }
+          return { ok: false, unauthorized: !!(result && result.error === 'unauthorized') };
+        } catch (err) {
+          return { ok: false, network: true };
+        }
+      }
+
+      function toCsvValue(value) {
+        let str = value === undefined || value === null ? '' : String(value);
+        if (/^[=+\-@]/.test(str)) str = "'" + str; // 数式として解釈されるのを防ぐ
+        return /[",\n\r]/.test(str) ? '"' + str.replace(/"/g, '""') + '"' : str;
+      }
+
+      // 6桁番号は ="012345" 形式で出力する。Excelは数式として評価して文字列 012345 を表示するため、
+      // ダブルクリックで開いても先頭0が消えない(toCsvValueが全体をCSVクォートしてエスケープする)。
+      function toExcelTextCsvValue(text) {
+        return toCsvValue('="' + text + '"');
+      }
+
+      function downloadCsv() {
+        const exportedAt = formatLocal(new Date());
+        const lines = [['打刻日時', '6桁番号', '備考', 'CSV出力日時'].map(toCsvValue).join(',')];
+        allScans.forEach(function (row) {
+          lines.push([
+            toCsvValue(row['打刻日時']),
+            toExcelTextCsvValue(row['6桁番号']),
+            toCsvValue(row['備考']),
+            toCsvValue(exportedAt)
+          ].join(','));
+        });
+
+        const blob = new Blob([String.fromCharCode(0xFEFF) + lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'foodselection_scan_' + exportedAt.replace(/[-: ]/g, function (c) { return c === ' ' ? '_' : ''; }) + '.csv';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      }
+
+      // ---- 記録処理 -------------------------------------------------------
+
+      async function recordCode(rawValue) {
+        const code = String(rawValue || '').trim();
+        if (!/^\d{6}$/.test(code)) {
+          showResult('error', '6桁の数字ではありません', '読み取った値: ' + (code || '(空)'));
+          return;
+        }
+
+        const scannedLocal = formatLocal(new Date());
+        const note = noteInput.value.trim();
+        showResult('idle', '記録中です...');
+
+        try {
+          const result = await callGasApi('logScan', {
+            apiKey: apiKey, code: code, note: note
+          });
+
+          if (result && result.success) {
+            if (result.duplicate) {
+              showResult('duplicate', 'この番号は既に記録済みです(前回: ' + result.previousScannedAt + ')',
+                code + ' を再度記録しました(' + timeOnly(result.scannedAt) + ')');
+            } else {
+              showResult('success', code + ' を記録しました(' + timeOnly(result.scannedAt) + ')');
+            }
+            manualForm.reset();
+            loadScanLog();
+          } else if (result && result.error === 'unauthorized') {
+            showResult('error', 'APIキーが正しくありません', 'ページを再読み込みして入力し直してください。');
+          } else {
+            showResult('error', '記録に失敗しました', (result && result.message) || '時間をおいて再度お試しください。');
+          }
+        } catch (err) {
+          // 通信エラー: 読み取り時点の端末時刻とともに端末内へ一時保存する
+          const pending = loadPending();
+          pending.push({ code: code, note: note, clientTimestamp: scannedLocal });
+          savePending(pending);
+          showResult('error', '通信エラーのため端末内に一時保存しました',
+            code + '(' + timeOnly(scannedLocal) + ') 未送信: ' + pending.length + '件');
+        }
+      }
+
+      async function handleDecoded(value) {
+        const now = Date.now();
+        if (isProcessing) return;
+        // 同じQRコードがカメラに写り続けている間、連続で何度も送信しないようにする。
+        if (value === lastValue && now - lastScanAt < DEBOUNCE_MS) return;
+
+        lastValue = value;
+        lastScanAt = now;
+        isProcessing = true;
+        await recordCode(value);
+        isProcessing = false;
+      }
+
+      async function sendPending() {
+        const pending = loadPending();
+        if (pending.length === 0) return;
+
+        CommonUtils.setLoading(sendPendingBtn, true, '送信中...', '未送信分を送信');
+        let sent = 0;
+        let dropped = 0;
+        let stopped = false;
+        const remaining = [];
+
+        for (let i = 0; i < pending.length; i++) {
+          if (stopped) { remaining.push(pending[i]); continue; }
+          try {
+            const result = await callGasApi('logScan', {
+              apiKey: apiKey,
+              code: pending[i].code,
+              note: pending[i].note,
+              clientTimestamp: pending[i].clientTimestamp
+            });
+            if (result && result.success) {
+              sent++;
+            } else if (result && result.error === 'validation_error') {
+              dropped++; // 再送しても成功しない不正データは破棄する
+            } else {
+              remaining.push(pending[i]);
+              stopped = true;
+            }
+          } catch (err) {
+            remaining.push(pending[i]);
+            stopped = true;
+          }
+        }
+
+        savePending(remaining);
+        CommonUtils.setLoading(sendPendingBtn, false, '送信中...', '未送信分を送信');
+
+        const summary = sent + '件送信しました' + (dropped ? '(不正な値 ' + dropped + '件を破棄)' : '');
+        showResult(remaining.length ? 'error' : 'success',
+          remaining.length ? '一部を送信できませんでした' : '未送信分を送信しました',
+          summary + (remaining.length ? ' / 未送信: ' + remaining.length + '件' : ''));
+        loadScanLog();
+      }
+
+      // ---- 初期化・イベント ----------------------------------------------
+
+      async function enterApp() {
+        keyCard.hidden = true;
+        scanApp.hidden = false;
+        noteInput.value = storageGet(localStorage, NOTE_STORAGE) || '';
+        renderPending();
+        const r = await loadScanLog();
+        if (!r.ok && r.unauthorized) {
+          // 保存済みのAPIキーが無効になっていた場合は入力画面に戻す
+          try { sessionStorage.removeItem(API_KEY_STORAGE); } catch (e) { /* 無視 */ }
+          apiKey = '';
+          scanApp.hidden = true;
+          keyCard.hidden = false;
+          keyError.hidden = false;
+          keyError.textContent = 'APIキーが正しくありません。入力し直してください。';
+          return;
+        }
+        if (!r.ok && r.network) {
+          listSummary.textContent = '記録一覧を取得できませんでした(通信エラー)。再読み込みしてください。';
+        }
+      }
+
+      keyForm.addEventListener('submit', async function (event) {
+        event.preventDefault();
+        const key = apiKeyInput.value.trim();
+        if (key === '') {
+          keyError.hidden = false;
+          keyError.textContent = 'APIキーを入力してください。';
+          return;
+        }
+        keyError.hidden = true;
+        CommonUtils.setLoading(keySubmitBtn, true, '確認中...', '開始する');
+        apiKey = key;
+        const r = await loadScanLog();
+        CommonUtils.setLoading(keySubmitBtn, false, '確認中...', '開始する');
+
+        if (r.ok) {
+          storageSet(sessionStorage, API_KEY_STORAGE, key);
+          apiKeyInput.value = '';
+          enterApp();
+        } else {
+          apiKey = '';
+          keyError.hidden = false;
+          keyError.textContent = r.unauthorized
+            ? 'APIキーが正しくありません。'
+            : '通信エラーが発生しました。ネットワーク環境をご確認ください。';
+        }
+      });
+
+      noteInput.addEventListener('change', function () {
+        storageSet(localStorage, NOTE_STORAGE, noteInput.value.trim());
+      });
+
+      cameraToggleBtn.addEventListener('click', async function () {
+        if (QrScanner.isScanning()) {
+          await QrScanner.stop();
+          qrReaderBox.hidden = true;
+          cameraStatus.hidden = true;
+          cameraToggleBtn.textContent = 'カメラを起動';
+          return;
+        }
+
+        if (!QrScanner.isSupported()) {
+          cameraStatus.hidden = false;
+          cameraStatus.textContent = 'このブラウザ・端末ではカメラを利用できません。下の手入力欄をご利用ください。';
+          return;
+        }
+
+        cameraToggleBtn.disabled = true;
+        qrReaderBox.hidden = false;
+        cameraStatus.hidden = false;
+        cameraStatus.textContent = 'カメラを起動しています...';
+
+        try {
+          await QrScanner.start('qr-reader', handleDecoded);
+          cameraToggleBtn.textContent = 'カメラを停止';
+          cameraStatus.textContent = '枠内にQRコードを写してください。';
+        } catch (err) {
+          qrReaderBox.hidden = true;
+          cameraStatus.textContent =
+            'カメラを起動できませんでした。カメラへのアクセス許可をご確認いただくか、下の手入力欄をご利用ください。';
+        } finally {
+          cameraToggleBtn.disabled = false;
+        }
+      });
+
+      manualForm.addEventListener('submit', async function (event) {
+        event.preventDefault();
+        CommonUtils.setLoading(manualSubmitBtn, true, '記録中...', 'この番号を記録する');
+        await recordCode(manualCodeInput.value);
+        CommonUtils.setLoading(manualSubmitBtn, false, '記録中...', 'この番号を記録する');
+      });
+
+      sendPendingBtn.addEventListener('click', sendPending);
+      reloadBtn.addEventListener('click', loadScanLog);
+      csvBtn.addEventListener('click', downloadCsv);
+
+      window.addEventListener('beforeunload', function () {
+        if (QrScanner.isScanning()) QrScanner.stop();
+      });
+
+      // 同一タブ内での再読み込み時はAPIキー入力を省略する(sessionStorage)。
+      const savedKey = storageGet(sessionStorage, API_KEY_STORAGE);
+      if (savedKey) {
+        apiKey = savedKey;
+        enterApp();
+      }
+    })();
+  </script>
+</body>
+</html>
